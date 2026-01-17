@@ -9,6 +9,8 @@ import math
 import requests
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import List
 
 def terraform_rate_expression_to_minutes(rate_expression: str) -> int:
     match = re.match(r"rate\((\d+)\s*(day|hour|minute)s?\)", rate_expression)
@@ -75,16 +77,16 @@ def segment_regions(nodes: Any, tile_size_degrees: int) -> dict[str, list[Any]]:
 
     return tile_dict
 
-def lambda_handler(event, context):
+@dataclass
+class S3Upload:
+    file_name: str
+    file_contents: str
+
+def prep_s3_data() -> List[S3Upload]:
     nodes = get_all_nodes()
     regions_dict = segment_regions(nodes=nodes, tile_size_degrees=TILE_SIZE_DEGREES)
+    out_files: List[S3Upload] = []
 
-    print("Uploading data to S3...")
-
-    s3 = boto3.client("s3")
-    bucket_new = os.getenv("OUTPUT_BUCKET", "cdn.deflock.me")
-
-    # TODO: handle outdated index files when their referenced files are deleted
     epoch = int(time.time())
     tile_index = {
         "expiration_utc": epoch + (UPDATE_RATE_MINS + GRACE_PERIOD_MINS) * 60,
@@ -93,9 +95,26 @@ def lambda_handler(event, context):
         "tile_size_degrees": TILE_SIZE_DEGREES,
     }
 
-    print("Uploading regions to S3...")
+    for latlng_string, elements in regions_dict.items():
+        lat, lon = latlng_string.split("/")
+        key = f"regions/{lat}/{lon}.json"
+        body = json.dumps(elements)
+        out_files.append(S3Upload(key, body))
 
-    def upload_json_to_s3(bucket, key, body):
+    # add index file
+    out_files.append(S3Upload("regions/index.json", json.dumps(tile_index)))
+
+    return out_files
+
+def lambda_handler(event, context):
+    print("Fetching data from overpass turbo...")
+    s3_uploads = prep_s3_data()
+
+    print("Uploading data to S3...")
+    s3 = boto3.client("s3")
+    bucket_new = os.getenv("OUTPUT_BUCKET", "cdn.deflock.me")
+
+    def upload_to_s3(bucket, key, body):
         s3.put_object(
             Bucket=bucket,
             Key=key,
@@ -106,14 +125,8 @@ def lambda_handler(event, context):
     # Use ThreadPoolExecutor for concurrent uploads
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = []
-        for latlng_string, elements in regions_dict.items():
-            lat, lon = latlng_string.split("/")
-            key = f"regions/{lat}/{lon}.json"
-            body = json.dumps(elements)
-            futures.append(executor.submit(upload_json_to_s3, bucket_new, key, body))
-
-        # add index file
-        futures.append(executor.submit(upload_json_to_s3, bucket_new, "regions/index.json", json.dumps(tile_index)))
+        for s3_upload in s3_uploads:
+            futures.append(executor.submit(upload_to_s3, bucket_new, s3_upload.file_name, s3_upload.file_contents))
 
         # Wait for all futures to complete
         for future in futures:
