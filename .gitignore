@@ -46,6 +46,8 @@ serverless/*/lambda.zip
 serverless/*/.build/
 serverless/*/src/*
 !serverless/*/src/alpr_cache.py
+!serverless/*/src/tests/__init__.py
+!serverless/*/src/tests/test_overpass_data.json
 !serverless/*/src/alpr_clusters.py
 !serverless/*/src/requirements.txt
 !serverless/*/src/Dockerfile
